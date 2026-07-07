@@ -1,0 +1,122 @@
+Aqui está a especificação técnica completa e estruturada da nossa solução. Você pode copiar e colar este texto diretamente na sua IA de desenvolvimento para iniciar a codificação do seu projeto.
+# Documento de Especificação Técnica: Distribuição Segura de Arquivos via AWS CloudFront + mTLS
+## 1. Contexto e Objetivos
+ * **Cenário:** Aplicação desktop cliente escrita em **C# 8.0** rodando com privilégios de Administrador em **28.000 máquinas físicas** com usuários leigos.
+ * **Objetivo:** Substituir um servidor de arquivos antigo para automatizar o download de pacotes de atualização (ex: executáveis de antivírus). A aplicação deve verificar se o arquivo existe localmente em uma pasta específica (ex: C:\fotosviagem); se não existir, deve buscá-lo na nuvem de forma performática e automatizada.
+ * **Premissa de Segurança:** Como o software roda na máquina final do usuário, **é proibido embutir chaves fixas da AWS (Access Keys)** no código. O acesso deve ser bloqueado para o público geral e permitido apenas para a aplicação autorizada.
+## 2. Arquitetura da Solução (AWS)
+A solução elimina o uso de Máquinas Virtuais (VMs) tradicionais e adota uma arquitetura Serverless baseada em borda (Edge):
+ 1. **Amazon S3 (Origem):** Um bucket privado que armazena os arquivos binários de atualização de forma segura.
+ 2. **AWS CloudFront (Distribuição/CDN):** Funciona como a rede de entrega global. O S3 é trancado com **OAC (Origin Access Control)**, fazendo com que apenas o CloudFront consiga ler os arquivos do S3.
+ 3. **Mutual TLS (mTLS) no CloudFront:** Mecanismo de segurança que exige que o cliente C# apresente um Certificado Digital X.509 válido para que a AWS autorize o início do download.
+## 3. Roteiro de Configuração na AWS
+Repasse estes passos para a equipe de infraestrutura ou utilize como guia no console AWS:
+ 1. **Criar a Autoridade Certificadora (CA) Privada:**
+   * Gerar uma chave privada e um certificado raiz (rootCA.crt) usando OpenSSL.
+   * Gerar o certificado do cliente (client.crt) assinado pela CA raiz e exportá-lo no formato .pfx (contendo a chave privada e protegido por senha).
+ 2. **Configurar o CloudFront:**
+   * Criar um **Trust Store** no CloudFront e fazer o upload do rootCA.crt.
+   * Ativar a opção **Mutual TLS (mTLS)** na distribuição do CloudFront, associando-a ao Trust Store criado.
+   * Garantir que a origem seja o bucket do S3 protegido por OAC.
+## 4. Template de Implementação no Cliente C# 8.0
+Instrua a IA de desenvolvimento a gerar o código baseado no modelo estrutural abaixo. Este código utiliza apenas bibliotecas nativas do .NET, sem necessidade de instalar o SDK da AWS nas 28.000 máquinas.
+```csharp
+using System;
+using System.IO;
+using System.Net.Http;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using System.Threading.Tasks;
+
+public class ServicoAtualizacaoS3
+{
+    // Configurações da Infraestrutura
+    private const string UrlCdnCloudFront = "https://updates.suaempresa.com/arquivos/antivirus_v2.exe";
+    private const string PastaDestinoLocal = @"C:\fotosviagem";
+    private const string NomeArquivo = "antivirus_v2.exe";
+    
+    // Configurações do Certificado Embutido (Crachá mTLS)
+    private const string NomeCertificadoEmbutido = "client_badge.pfx";
+    private const string SenhaCertificado = "SuaSenhaSuperSeguraAqui";
+
+    public async Task ExecutarFluxoAtualizacaoAsync()
+    {
+        string caminhoCompletoLocal = Path.Combine(PastaDestinoLocal, NomeArquivo);
+
+        // Passo 1: Validação de existência local (Evita tráfego desnecessário)
+        if (File.Exists(caminhoCompletoLocal) && ValidarInstalacaoAtual())
+        {
+            Console.WriteLine("Arquivo já existe localmente e está atualizado. Encerrando processo.");
+            return;
+        }
+
+        Console.WriteLine("Arquivo ausente ou desatualizado. Iniciando download via mTLS...");
+
+        try
+        {
+            // Garantir diretório local
+            Directory.CreateDirectory(PastaDestinoLocal);
+
+            // Passo 2: Carregar o certificado digital (.pfx)
+            // Dica para a IA: Pode ser carregado como Embedded Resource ou arquivo físico na pasta do app
+            string caminhoCertificado = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, NomeCertificadoEmbutido);
+            var certificadoCliente = new X509Certificate2(caminhoCertificado, SenhaCertificado);
+
+            // Passo 3: Configurar o Handler HTTP para injetar o certificado no Handshake SSL
+            using var handler = new HttpClientHandler();
+            handler.ClientCertificates.Add(certificadoCliente);
+
+            // Passo 4: Realizar o download seguro via Stream
+            using var client = new HttpClient(handler);
+            using var response = await client.GetAsync(UrlCdnCloudFront, HttpCompletionOption.ResponseHeadersRead);
+            
+            response.EnsureSuccessStatusCode(); // Retornará 403 ou erro de SSL se o certificado falhar
+
+            using (var streamParaBaixar = await response.Content.ReadAsStreamAsync())
+            using (var arquivoLocalStream = new FileStream(caminhoCompletoLocal, FileMode.Create, FileAccess.Write, FileShare.None, 8192, true))
+            {
+                await streamParaBaixar.CopyToAsync(arquivoLocalStream);
+            }
+
+            // Passo 5: Validar integridade do binário baixado
+            if (VerificarIntegridadeSha256(caminhoCompletoLocal, "HASH_ESPERADO_AQUI"))
+            {
+                Console.WriteLine("Download concluído com sucesso e arquivo verificado! Prosseguindo para instalação.");
+                // Executar comando de instalação silenciosa aqui...
+            }
+            else
+            {
+                Console.WriteLine("Erro crítica: O arquivo baixado falhou na checagem de integridade SHA-256.");
+                File.Delete(caminhoCompletoLocal);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Falha catastrófica no processo de download/autenticação: {ex.Message}");
+        }
+    }
+
+    private bool ValidarInstalacaoAtual()
+    {
+        // Lógica customizada para checar se a versão atual da máquina do usuário está correta
+        return false;
+    }
+
+    private bool VerificarIntegridadeSha256(string caminhoArquivo, string hashEsperado)
+    {
+        using var sha256 = SHA256.Create();
+        using var stream = File.OpenRead(caminhoArquivo);
+        var hashBytes = sha256.ComputeHash(stream);
+        var hashGerado = BitConverter.ToString(hashBytes).Replace("-", "").ToLowerInvariant();
+        
+        // IA: Implementar aqui a validação real comparando hashGerado com o hashEsperado
+        return true; 
+    }
+}
+
+```
+## 5. Diretrizes para a IA de Desenvolvimento
+Ao submeter este documento, peça para a IA focar em:
+ 1. **Refinar o gerenciamento do Certificado X509**, garantindo que o arquivo .pfx seja lido de forma eficiente (preferencialmente como recurso embutido no assembly do C# para evitar exclusões acidentais pelos usuários).
+ 2. **Otimizar o consumo de memória no HttpClient** durante a escrita no disco usando buffers assíncronos apropriados para a versão C# 8.0 / .NET Standard ou .NET Core correspondente.
+ 3. **Criar logs de erro detalhados**, capturando exceções específicas de WebException ou HttpRequestException para facilitar o diagnóstico remoto caso alguma das 28.000 máquinas apresente problemas de TLS na rede corporativa/doméstica.
